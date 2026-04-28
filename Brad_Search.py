@@ -123,7 +123,7 @@ def open_path(path: str) -> None:
 def open_folder_for_path(path: str) -> None:
     if is_windows():
         if os.path.isfile(path):
-            subprocess.Popen(["explorer", f'/select,{path}'])
+            subprocess.Popen(["explorer", "/select,", path])
         else:
             os.startfile(path)  # type: ignore[attr-defined]
     else:
