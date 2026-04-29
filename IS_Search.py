@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import queue
 import re
@@ -11,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+from ctypes import wintypes
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -19,14 +21,44 @@ from typing import Callable, Iterator, Optional
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "Brad Search"
-APP_DIR = Path.home() / "AppData" / "Local" / "BradSearch" if os.name == "nt" else Path.home() / ".brad_search"
-DB_PATH = APP_DIR / "brad_search_index.sqlite3"
-LOG_PATH = APP_DIR / "brad_search.log"
+APP_TITLE = "IS Search"
+APP_DIR = Path.home() / "AppData" / "Local" / "ISSearch" if os.name == "nt" else Path.home() / ".is_search"
+DB_PATH = APP_DIR / "is_search_index.sqlite3"
+LOG_PATH = APP_DIR / "is_search.log"
+SETTINGS_PATH = APP_DIR / "settings.json"
+
+
+def resource_path(*parts: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
+
+
+IS_LOGO_PATH = resource_path("Logo", "IS.png")
+Q_LOGO_PATH = resource_path("Logo", "Q Grey Logo.png")
+Q_ICON_PATH = resource_path("Logo", "Q Grey Logo.ico")
 
 FILE_ATTRIBUTE_HIDDEN = 0x2
 FILE_ATTRIBUTE_SYSTEM = 0x4
 INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+PROCESS_TERMINATE = 0x0001
+TH32CS_SNAPPROCESS = 0x00000002
+WM_CLOSE = 0x0010
+PROCESS_SNAPSHOT_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
 
 WINDOWS_EXCLUDED_PREFIXES = [
     r"C:\Windows\WinSxS",
@@ -40,6 +72,114 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
+def set_windows_app_id() -> None:
+    if not is_windows():
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Quanta.ISSearch")
+    except Exception:
+        pass
+
+
+def find_other_is_search_pids() -> set[int]:
+    if not is_windows():
+        return set()
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot in (None, PROCESS_SNAPSHOT_INVALID_HANDLE):
+        return set()
+
+    current_pid = os.getpid()
+    pids: set[int] = set()
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+
+    try:
+        has_entry = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while has_entry:
+            pid = int(entry.th32ProcessID)
+            exe_name = str(entry.szExeFile).lower()
+            if pid != current_pid and exe_name == "is_search.exe":
+                pids.add(pid)
+            has_entry = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    return pids
+
+
+def request_process_windows_close(pids: set[int]) -> None:
+    if not is_windows() or not pids:
+        return
+
+    user32 = ctypes.windll.user32
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def enum_window(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if int(pid.value) in pids:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        return True
+
+    user32.EnumWindows(enum_window, 0)
+
+
+def terminate_processes(pids: set[int]) -> int:
+    if not is_windows() or not pids:
+        return 0
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    closed = 0
+    for pid in pids:
+        handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+        if not handle:
+            continue
+        try:
+            if kernel32.TerminateProcess(handle, 0):
+                closed += 1
+        finally:
+            kernel32.CloseHandle(handle)
+    return closed
+
+
+def close_other_is_search_instances() -> None:
+    other_pids = find_other_is_search_pids()
+    if not other_pids:
+        return
+
+    request_process_windows_close(other_pids)
+    time.sleep(1.5)
+
+    remaining_pids = find_other_is_search_pids()
+    terminated = terminate_processes(remaining_pids)
+    write_log(
+        f"Closed {len(other_pids) - len(remaining_pids)} existing IS_Search.exe instance(s); "
+        f"terminated {terminated} remaining instance(s)."
+    )
+
+
 def ensure_app_dir() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -51,7 +191,7 @@ def write_log(message: str) -> None:
         f.write(f"[{stamp}] {message}\n")
 
 
-def get_default_roots() -> list[str]:
+def get_detected_roots() -> list[str]:
     if is_windows():
         try:
             roots = []
@@ -63,6 +203,31 @@ def get_default_roots() -> list[str]:
         except Exception:
             return ["C:\\"]
     return ["/"]
+
+
+def load_saved_default_roots() -> list[str]:
+    try:
+        if not SETTINGS_PATH.exists():
+            return []
+        with SETTINGS_PATH.open("r", encoding="utf-8") as f:
+            settings = json.load(f)
+        roots = settings.get("default_roots", [])
+        if not isinstance(roots, list):
+            return []
+        return split_roots(";".join(str(root) for root in roots))
+    except Exception as exc:
+        write_log(f"Could not load saved default roots: {exc}")
+        return []
+
+
+def save_default_roots(roots: list[str]) -> None:
+    ensure_app_dir()
+    with SETTINGS_PATH.open("w", encoding="utf-8") as f:
+        json.dump({"default_roots": roots}, f, indent=2)
+
+
+def get_default_roots() -> list[str]:
+    return load_saved_default_roots() or get_detected_roots()
 
 
 def normalize_root(root: str) -> Optional[str]:
@@ -121,13 +286,11 @@ def open_path(path: str) -> None:
 
 
 def open_folder_for_path(path: str) -> None:
+    folder = path if os.path.isdir(path) else os.path.dirname(path) or "."
     if is_windows():
-        if os.path.isfile(path):
-            subprocess.Popen(["explorer", f'/select,{path}'])
-        else:
-            os.startfile(path)  # type: ignore[attr-defined]
+        os.startfile(folder)  # type: ignore[attr-defined]
     else:
-        open_path(path if os.path.isdir(path) else os.path.dirname(path) or ".")
+        open_path(folder)
 
 
 def format_size(value: Optional[int]) -> str:
@@ -228,7 +391,6 @@ class SearchResult:
     full_path: str
     size_bytes: Optional[int]
     modified: float
-    content_preview: str
 
 
 def compile_query_pattern(options: SearchOptions) -> re.Pattern:
@@ -286,7 +448,6 @@ def live_search_iter(
                 subject = entry.name if options.match_name_only else path
                 path_match = bool(regex.search(subject))
                 content_match = False
-                preview = ""
                 size_bytes = None
                 modified = 0.0
 
@@ -305,7 +466,6 @@ def live_search_iter(
                                 for line in f:
                                     if regex.search(line):
                                         content_match = True
-                                        preview = " ".join(line.strip().split())[:300]
                                         break
                         except Exception:
                             pass
@@ -320,7 +480,6 @@ def live_search_iter(
                     full_path=path,
                     size_bytes=size_bytes,
                     modified=modified,
-                    content_preview=preview,
                 )
 
                 count += 1
@@ -662,7 +821,6 @@ class IndexDB:
                         full_path=row["full_path"],
                         size_bytes=row["size_bytes"],
                         modified=row["modified"] or 0.0,
-                        content_preview="",
                     ))
                     count += 1
                     if options.max_results > 0 and count >= options.max_results:
@@ -823,21 +981,33 @@ class ManualIndexWorker(threading.Thread):
 
 
 class BackgroundIndexer(threading.Thread):
-    def __init__(self, db: IndexDB, roots: list[str], interval_seconds: int, out_queue: queue.Queue, cancel_event: threading.Event):
+    def __init__(
+        self,
+        db: IndexDB,
+        roots: list[str],
+        interval_seconds: int,
+        out_queue: queue.Queue,
+        cancel_event: threading.Event,
+        initial_roots: Optional[list[str]] = None,
+    ):
         super().__init__(daemon=True)
         self.db = db
         self.roots = roots
         self.interval_seconds = max(30, interval_seconds)
         self.out_queue = out_queue
         self.cancel_event = cancel_event
+        self.initial_roots = initial_roots or []
 
     def run(self) -> None:
         try:
             self.out_queue.put(("bg_state", f"Background indexer running every {self.interval_seconds // 60} min"))
+            first_cycle = True
             while not self.cancel_event.is_set():
                 cycle_started = time.time()
+                roots = self.initial_roots if first_cycle and self.initial_roots else self.roots
+                first_cycle = False
                 self.db.rebuild_roots(
-                    self.roots,
+                    roots,
                     self.cancel_event,
                     status_cb=lambda msg: self.out_queue.put(("bg_status", msg)),
                     progress_cb=lambda root, n: self.out_queue.put(("bg_progress", (root, n))),
@@ -856,7 +1026,7 @@ class BackgroundIndexer(threading.Thread):
             self.out_queue.put(("bg_error", f"Background indexing failed: {exc}"))
 
 
-class BradSearchApp:
+class ISSearchApp:
     columns = [
         ("match_type", "Match", 110),
         ("item_type", "Type", 90),
@@ -864,7 +1034,6 @@ class BradSearchApp:
         ("full_path", "Full Path", 620),
         ("size", "Size", 100),
         ("modified", "Modified", 160),
-        ("content_preview", "Content Preview", 300),
     ]
 
     def __init__(self, root: tk.Tk):
@@ -888,11 +1057,26 @@ class BradSearchApp:
         self.auto_after_id: Optional[str] = None
         self.sort_column = "modified"
         self.sort_reverse = False
+        self.initial_indexing = False
+        self.initial_index_roots: list[str] = []
+        self.initial_index_placeholder = "still indexing..."
+        self.initial_index_current_root = ""
+        self.initial_index_current_count = 0
+        self.logo_images: list[tk.PhotoImage] = []
+        self.window_icon_image: Optional[tk.PhotoImage] = None
 
+        self._apply_window_icon()
         self._build_ui()
         self.roots_var.set(";".join(get_default_roots()))
         self.pattern_entry.focus_set()
         self.refresh_index_summary()
+        startup_roots = split_roots(self.roots_var.get()) or get_default_roots()
+        missing_startup_roots = self.get_unindexed_roots(startup_roots)
+        if missing_startup_roots:
+            self.initial_index_roots = startup_roots
+            self.start_background_indexing(initial=True, initial_roots=missing_startup_roots)
+        else:
+            self.start_background_indexing()
         self._poll_queue()
 
     def _build_ui(self) -> None:
@@ -909,17 +1093,21 @@ class BradSearchApp:
 
         search_row = ttk.Frame(search_box, padding=10)
         search_row.grid(row=0, column=0, sticky="ew")
-        search_row.columnconfigure(0, weight=1)
+        search_row.columnconfigure(1, weight=1)
 
         self.pattern_var = tk.StringVar()
         self.pattern_var.trace_add("write", self._auto_search_changed)
 
-        ttk.Label(search_row, text="Pattern").grid(row=0, column=0, sticky="w")
+        q_logo_frame = tk.Frame(search_row, bg="white", bd=0, highlightthickness=0, padx=8, pady=4)
+        q_logo_frame.grid(row=0, column=0, rowspan=3, sticky="w", padx=(0, 12))
+        self._add_header_logo(q_logo_frame, Q_LOGO_PATH, 0)
+
+        ttk.Label(search_row, text="Pattern").grid(row=0, column=1, sticky="w")
         self.pattern_entry = ttk.Entry(search_row, textvariable=self.pattern_var, font=("Segoe UI", 11))
-        self.pattern_entry.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(4, 0))
+        self.pattern_entry.grid(row=1, column=1, sticky="ew", pady=(4, 0))
         self.pattern_entry.bind("<Return>", lambda _e: self.start_search())
 
-        ttk.Label(search_row, text="Pattern mode").grid(row=0, column=1, sticky="w")
+        ttk.Label(search_row, text="Pattern mode").grid(row=0, column=2, sticky="w")
         self.query_mode_var = tk.StringVar(value="Auto")
         ttk.Combobox(
             search_row,
@@ -927,25 +1115,19 @@ class BradSearchApp:
             values=["Auto", "Wildcard", "Regex"],
             state="readonly",
             width=12,
-        ).grid(row=1, column=1, padx=(0, 10))
-
-        ttk.Label(search_row, text="Search mode").grid(row=0, column=2, sticky="w")
-        self.source_mode_var = tk.StringVar(value="Auto")
-        ttk.Combobox(
-            search_row,
-            textvariable=self.source_mode_var,
-            values=["Auto", "Mixed", "Indexed only", "Live only"],
-            state="readonly",
-            width=14,
-        ).grid(row=1, column=2, padx=(0, 10))
+        ).grid(row=1, column=2, padx=(12, 10))
 
         self.search_button = ttk.Button(search_row, text="Search", command=self.start_search)
         self.search_button.grid(row=1, column=3)
         self.stop_search_button = ttk.Button(search_row, text="Stop", command=self.stop_search, state="disabled")
         self.stop_search_button.grid(row=1, column=4, padx=(8, 0))
 
-        self.help_var = tk.StringVar(value="Auto pattern: TAP*.xlsx uses wildcard. Auto/Mixed can combine indexed and live roots.")
-        ttk.Label(search_row, textvariable=self.help_var).grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        is_logo_frame = tk.Frame(search_row, bg="white", bd=0, highlightthickness=0, padx=8, pady=4)
+        is_logo_frame.grid(row=0, column=5, rowspan=3, sticky="e", padx=(16, 0))
+        self._add_header_logo(is_logo_frame, IS_LOGO_PATH, 0)
+
+        self.help_var = tk.StringVar(value="Auto pattern: TAP*.xlsx uses wildcard. Default search uses the current index.")
+        ttk.Label(search_row, textvariable=self.help_var).grid(row=2, column=1, columnspan=4, sticky="w", pady=(8, 0))
 
         options = ttk.LabelFrame(top, text="Options")
         options.grid(row=1, column=0, sticky="ew", pady=(0, 10))
@@ -956,7 +1138,6 @@ class BradSearchApp:
         self.max_results_var = tk.StringVar(value="0")
         self.max_file_mb_var = tk.StringVar(value="20")
         self.match_name_only_var = tk.BooleanVar(value=True)
-        self.search_content_var = tk.BooleanVar(value=False)
         self.include_hidden_var = tk.BooleanVar(value=False)
         self.case_sensitive_var = tk.BooleanVar(value=False)
         self.auto_search_var = tk.BooleanVar(value=False)
@@ -976,6 +1157,7 @@ class BradSearchApp:
         self.roots_entry = ttk.Entry(roots_row, textvariable=self.roots_var)
         self.roots_entry.grid(row=0, column=0, sticky="ew")
         ttk.Button(roots_row, text="Browse…", command=self.browse_root).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(roots_row, text="Save default", command=self.save_roots_as_default).grid(row=0, column=2, padx=(8, 0))
 
         ttk.Combobox(grid, textvariable=self.type_var, values=["Any", "File", "Directory"], state="readonly", width=12).grid(row=1, column=1, sticky="w", padx=(12, 0))
         ttk.Entry(grid, textvariable=self.max_results_var, width=12).grid(row=1, column=2, sticky="w", padx=(12, 0))
@@ -984,13 +1166,9 @@ class BradSearchApp:
         actions = ttk.Frame(grid)
         actions.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         ttk.Checkbutton(actions, text="Match name only", variable=self.match_name_only_var).grid(row=0, column=0, padx=(0, 12))
-        ttk.Checkbutton(actions, text="Search file contents (live only)", variable=self.search_content_var).grid(row=0, column=1, padx=(0, 12))
-        ttk.Checkbutton(actions, text="Include hidden/system", variable=self.include_hidden_var).grid(row=0, column=2, padx=(0, 12))
-        ttk.Checkbutton(actions, text="Case sensitive", variable=self.case_sensitive_var).grid(row=0, column=3, padx=(0, 12))
-        ttk.Checkbutton(actions, text="Auto search while typing", variable=self.auto_search_var).grid(row=0, column=4, padx=(0, 20))
-        ttk.Button(actions, text="Open", command=self.open_selected).grid(row=0, column=5, padx=(0, 8))
-        ttk.Button(actions, text="Open folder", command=self.open_selected_folder).grid(row=0, column=6, padx=(0, 8))
-        ttk.Button(actions, text="Copy path", command=self.copy_selected_path).grid(row=0, column=7)
+        ttk.Checkbutton(actions, text="Include hidden/system", variable=self.include_hidden_var).grid(row=0, column=1, padx=(0, 12))
+        ttk.Checkbutton(actions, text="Case sensitive", variable=self.case_sensitive_var).grid(row=0, column=2, padx=(0, 12))
+        ttk.Checkbutton(actions, text="Auto search while typing", variable=self.auto_search_var).grid(row=0, column=3, padx=(0, 20))
 
         index_box = ttk.LabelFrame(top, text="Index")
         index_box.grid(row=2, column=0, sticky="ew")
@@ -1025,6 +1203,14 @@ class BradSearchApp:
         self.tree = ttk.Treeview(mid, columns=[c[0] for c in self.columns], show="headings", selectmode="browse")
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<Double-1>", lambda _e: self.open_selected())
+        self.tree.bind("<Button-3>", self.show_result_menu)
+        self.tree.bind("<Button-2>", self.show_result_menu)
+
+        self.result_menu = tk.Menu(self.root, tearoff=False)
+        self.result_menu.add_command(label="Open", command=self.open_selected)
+        self.result_menu.add_command(label="Open folder", command=self.open_selected_folder)
+        self.result_menu.add_separator()
+        self.result_menu.add_command(label="Copy path", command=self.copy_selected_path)
 
         vsb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(mid, orient="horizontal", command=self.tree.xview)
@@ -1045,6 +1231,36 @@ class BradSearchApp:
         ttk.Label(bottom, text=f"Log: {LOG_PATH}").grid(row=1, column=0, sticky="w")
         ttk.Label(bottom, textvariable=self.summary_var).grid(row=0, column=1, sticky="e")
 
+    def _apply_window_icon(self) -> None:
+        if Q_ICON_PATH.exists():
+            try:
+                self.root.iconbitmap(default=str(Q_ICON_PATH))
+            except Exception as exc:
+                write_log(f"Could not load window icon {Q_ICON_PATH}: {exc}")
+        if Q_LOGO_PATH.exists():
+            try:
+                self.window_icon_image = tk.PhotoImage(file=str(Q_LOGO_PATH))
+                self.root.iconphoto(True, self.window_icon_image)
+            except Exception as exc:
+                write_log(f"Could not load toolbar icon {Q_LOGO_PATH}: {exc}")
+
+    def _add_header_logo(self, parent: tk.Frame, image_path: Path, column: int) -> None:
+        if not image_path.exists():
+            write_log(f"Header logo missing: {image_path}")
+            return
+        try:
+            image = tk.PhotoImage(file=str(image_path))
+        except Exception as exc:
+            write_log(f"Could not load header logo {image_path}: {exc}")
+            return
+        self.logo_images.append(image)
+        tk.Label(parent, image=image, bg="white", bd=0, highlightthickness=0).grid(
+            row=0,
+            column=column,
+            padx=(0 if column == 0 else 10, 0),
+            sticky="ne",
+        )
+
     def refresh_index_summary(self) -> None:
         rows = self.db.get_root_stats()
         total_items = sum(int(r["item_count"]) for r in rows)
@@ -1052,6 +1268,51 @@ class BradSearchApp:
         newest = max((float(r["last_indexed"]) for r in rows), default=0.0)
         newest_text = format_timestamp(newest) if newest else "never"
         self.index_summary_var.set(f"Indexed roots: {roots} | Items: {total_items:,} | Last update: {newest_text}")
+
+    def get_unindexed_roots(self, roots: list[str]) -> list[str]:
+        indexed_keys = self.db.get_indexed_roots()
+        missing: list[str] = []
+        for root in roots:
+            norm = normalize_root(root) or root
+            if not os.path.exists(norm):
+                continue
+            if normalized_root_key(norm) not in indexed_keys:
+                missing.append(norm)
+        return missing
+
+    def initial_index_finished(self) -> bool:
+        return bool(self.initial_index_roots) and not self.get_unindexed_roots(self.initial_index_roots)
+
+    def is_initial_index_placeholder(self) -> bool:
+        return self.pattern_var.get().startswith("still indexing")
+
+    def update_initial_index_placeholder(
+        self,
+        root_name: Optional[str] = None,
+        item_count: Optional[int] = None,
+    ) -> None:
+        if root_name:
+            self.initial_index_current_root = root_name
+        if item_count is not None:
+            self.initial_index_current_count = item_count
+        root_text = self.initial_index_current_root or "default drives"
+        self.pattern_var.set(f"still indexing {root_text} - {self.initial_index_current_count:,} files")
+
+    def set_initial_indexing_state(self, active: bool) -> None:
+        self.initial_indexing = active
+        if active:
+            self.search_button.configure(state="disabled")
+            self.pattern_entry.configure(state="disabled")
+            if not self.pattern_var.get().strip():
+                self.update_initial_index_placeholder()
+            self.status_var.set("Still indexing. Search will be available when the default drive indexes finish.")
+            self.help_var.set("Still indexing. Default drives will use indexed search once the first pass completes.")
+        else:
+            if self.is_initial_index_placeholder():
+                self.pattern_var.set("")
+            self.pattern_entry.configure(state="normal")
+            self.search_button.configure(state="normal")
+            self.help_var.set("Auto pattern: TAP*.xlsx uses wildcard. Default search uses the current index.")
 
     def show_indexed_roots(self) -> None:
         rows = self.db.get_root_stats()
@@ -1070,7 +1331,22 @@ class BradSearchApp:
             roots.append(selected)
             self.roots_var.set(";".join(split_roots(";".join(roots))))
 
+    def save_roots_as_default(self) -> None:
+        roots = split_roots(self.roots_var.get())
+        if not roots:
+            messagebox.showerror(APP_TITLE, "Add at least one root before saving defaults.")
+            return
+        try:
+            save_default_roots(roots)
+        except Exception as exc:
+            write_log(traceback.format_exc())
+            messagebox.showerror(APP_TITLE, f"Could not save default roots:\n{exc}")
+            return
+        self.status_var.set(f"Saved {len(roots)} default root(s). They will be used when IS Search starts.")
+
     def _auto_search_changed(self, *_args) -> None:
+        if self.initial_indexing:
+            return
         if not self.auto_search_var.get():
             return
         if self.auto_after_id:
@@ -1104,12 +1380,12 @@ class BradSearchApp:
             match_name_only=self.match_name_only_var.get(),
             search_type=self.type_var.get(),
             include_hidden=self.include_hidden_var.get(),
-            search_content=self.search_content_var.get(),
+            search_content=False,
             case_sensitive=self.case_sensitive_var.get(),
             max_results=max_results,
             max_file_size_mb=max_file_mb,
             query_mode=self.query_mode_var.get(),
-            source_mode=self.source_mode_var.get(),
+            source_mode="Indexed only",
         )
 
     def clear_results(self) -> None:
@@ -1119,6 +1395,10 @@ class BradSearchApp:
         self.summary_var.set("0 results")
 
     def start_search(self) -> None:
+        if self.initial_indexing:
+            self.status_var.set("Still indexing. Search will be available when the first index finishes.")
+            return
+
         try:
             options = self.collect_options()
         except ValueError as exc:
@@ -1145,8 +1425,11 @@ class BradSearchApp:
             self.status_var.set("Starting live search…")
             self.search_worker = LiveSearchWorker(options, self.queue, self.search_cancel_event)
         elif source_mode == "Indexed only":
+            if live_roots and indexed_roots:
+                options = replace(options, roots=indexed_roots)
+                live_roots = []
             if live_roots:
-                messagebox.showerror(APP_TITLE, "Indexed only was selected, but one or more selected roots are not indexed yet.")
+                messagebox.showerror(APP_TITLE, "Search is index-only, but one or more selected roots are not indexed yet.")
                 return
             self.status_var.set("Starting indexed search…")
             self.search_worker = IndexedSearchWorker(self.db, options, self.queue, self.search_cancel_event)
@@ -1184,9 +1467,10 @@ class BradSearchApp:
         self.refresh_index_button.configure(state="disabled")
         self.status_var.set("Indexing selected roots in the background…")
 
-    def start_background_indexing(self) -> None:
+    def start_background_indexing(self, initial: bool = False, initial_roots: Optional[list[str]] = None) -> None:
         if self.bg_indexer and self.bg_indexer.is_alive():
-            messagebox.showinfo(APP_TITLE, "Background indexing is already running.")
+            if not initial:
+                messagebox.showinfo(APP_TITLE, "Background indexing is already running.")
             return
         roots = split_roots(self.roots_var.get()) or get_default_roots()
         try:
@@ -1197,10 +1481,19 @@ class BradSearchApp:
             messagebox.showerror(APP_TITLE, "Interval must be a positive integer number of minutes.")
             return
         self.bg_cancel_event = threading.Event()
-        self.bg_indexer = BackgroundIndexer(self.db, roots, interval_minutes * 60, self.queue, self.bg_cancel_event)
+        self.bg_indexer = BackgroundIndexer(
+            self.db,
+            roots,
+            interval_minutes * 60,
+            self.queue,
+            self.bg_cancel_event,
+            initial_roots=initial_roots,
+        )
         self.bg_indexer.start()
         self.start_bg_button.configure(state="disabled")
         self.stop_bg_button.configure(state="normal")
+        if initial:
+            self.set_initial_indexing_state(True)
 
     def stop_background_indexing(self) -> None:
         if self.bg_indexer and self.bg_indexer.is_alive():
@@ -1221,13 +1514,13 @@ class BradSearchApp:
                 elif kind == "search_status":
                     self.status_var.set(str(payload))
                 elif kind == "search_done":
-                    self.search_button.configure(state="normal")
+                    self.search_button.configure(state="disabled" if self.initial_indexing else "normal")
                     self.stop_search_button.configure(state="disabled")
                     self.summary_var.set(f"{payload.get('count', self.result_count):,} results")
                     suffix = " (stopped)" if payload.get("cancelled") else ""
                     self.status_var.set(f"{payload.get('mode', 'Search')} finished in {payload.get('duration', 0.0):.1f}s{suffix}")
                 elif kind == "search_error":
-                    self.search_button.configure(state="normal")
+                    self.search_button.configure(state="disabled" if self.initial_indexing else "normal")
                     self.stop_search_button.configure(state="disabled")
                     self.status_var.set(str(payload))
                     messagebox.showerror(APP_TITLE, f"{payload}\n\nLog: {LOG_PATH}")
@@ -1236,10 +1529,14 @@ class BradSearchApp:
                     self.status_var.set(str(payload))
                 elif kind == "index_progress":
                     root_name, item_count = payload
+                    if self.initial_indexing:
+                        self.update_initial_index_placeholder(str(root_name), int(item_count))
                     self.status_var.set(f"Indexing {root_name}… {item_count:,} items staged")
                 elif kind == "index_done":
                     self.refresh_index_button.configure(state="normal")
                     self.refresh_index_summary()
+                    if self.initial_indexing and self.initial_index_finished():
+                        self.set_initial_indexing_state(False)
                     suffix = " (stopped)" if payload.get("cancelled") else ""
                     self.status_var.set(f"Manual index finished in {payload.get('duration', 0.0):.1f}s{suffix}")
                 elif kind == "index_error":
@@ -1254,12 +1551,18 @@ class BradSearchApp:
                         self.stop_bg_button.configure(state="disabled")
                         self.refresh_index_summary()
                 elif kind == "bg_status":
+                    if self.initial_indexing and str(payload).startswith("Indexing "):
+                        self.update_initial_index_placeholder(str(payload).removeprefix("Indexing "), 0)
                     self.bg_status_var.set(f"Background indexer: {payload}")
                 elif kind == "bg_progress":
                     root_name, item_count = payload
+                    if self.initial_indexing:
+                        self.update_initial_index_placeholder(str(root_name), int(item_count))
                     self.bg_status_var.set(f"Background indexer: {root_name}… {item_count:,} items staged")
                 elif kind == "bg_cycle_done":
                     self.refresh_index_summary()
+                    if self.initial_indexing and self.initial_index_finished():
+                        self.set_initial_indexing_state(False)
                     self.bg_status_var.set(
                         f"Background indexer: cycle finished in {payload.get('duration', 0.0):.1f}s; waiting for next interval"
                     )
@@ -1282,10 +1585,20 @@ class BradSearchApp:
             result.full_path,
             format_size(result.size_bytes),
             format_timestamp(result.modified),
-            result.content_preview,
         ))
         self.result_count += 1
         self.summary_var.set(f"{self.result_count:,} results")
+
+    def show_result_menu(self, event: tk.Event) -> str:
+        row_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+        if not row_id or column_id != "#4":
+            return "break"
+        self.tree.selection_set(row_id)
+        self.tree.focus(row_id)
+        self.result_menu.tk_popup(event.x_root, event.y_root)
+        self.result_menu.grab_release()
+        return "break"
 
     def selected_path(self) -> Optional[str]:
         selection = self.tree.selection()
@@ -1344,7 +1657,9 @@ class BradSearchApp:
 
 def main() -> int:
     ensure_app_dir()
-    write_log("Brad Search starting")
+    close_other_is_search_instances()
+    write_log("IS Search starting")
+    set_windows_app_id()
     root = tk.Tk()
     try:
         style = ttk.Style(root)
@@ -1354,7 +1669,7 @@ def main() -> int:
             style.theme_use("clam")
     except Exception:
         pass
-    BradSearchApp(root)
+    ISSearchApp(root)
     root.mainloop()
     return 0
 
