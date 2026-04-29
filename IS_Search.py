@@ -1126,7 +1126,7 @@ class ISSearchApp:
         is_logo_frame.grid(row=0, column=5, rowspan=3, sticky="e", padx=(16, 0))
         self._add_header_logo(is_logo_frame, IS_LOGO_PATH, 0)
 
-        self.help_var = tk.StringVar(value="Auto pattern: TAP*.xlsx uses wildcard. Default search uses the current index.")
+        self.help_var = tk.StringVar(value="Auto pattern: *SPEC*.xlsx uses wildcard to find any file with the word 'SPEC' ending in .xlsx.")
         ttk.Label(search_row, textvariable=self.help_var).grid(row=2, column=1, columnspan=4, sticky="w", pady=(8, 0))
 
         options = ttk.LabelFrame(top, text="Options")
@@ -1312,7 +1312,7 @@ class ISSearchApp:
                 self.pattern_var.set("")
             self.pattern_entry.configure(state="normal")
             self.search_button.configure(state="normal")
-            self.help_var.set("Auto pattern: TAP*.xlsx uses wildcard. Default search uses the current index.")
+            self.help_var.set("Auto pattern: *SPEC*.xlsx uses wildcard to find any file with the word 'SPEC' ending in .xlsx.")
 
     def show_indexed_roots(self) -> None:
         rows = self.db.get_root_stats()

@@ -2,8 +2,7 @@
 
 use std::{
     collections::HashSet,
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -82,7 +81,6 @@ struct SearchOptions {
     include_hidden: bool,
     case_sensitive: bool,
     max_results: usize,
-    max_file_size_mb: f64,
     query_mode: QueryMode,
 }
 
@@ -704,7 +702,9 @@ impl IndexDb {
     ) -> Result<()> {
         let norm_root = normalize_root(root).unwrap_or_else(|| root.to_string());
         if !Path::new(&norm_root).exists() {
-            let _ = tx.send(AppEvent::IndexStatus(format!("Skipping missing root: {norm_root}")));
+            let _ = tx.send(AppEvent::IndexStatus(format!(
+                "Skipping missing root: {norm_root}"
+            )));
             return Ok(());
         }
 
@@ -899,7 +899,9 @@ impl IndexDb {
             if options.case_sensitive {
                 sql.push_str(&format!(" AND {subject_col} LIKE ? ESCAPE '\\'"));
             } else {
-                sql.push_str(&format!(" AND lower({subject_col}) LIKE lower(?) ESCAPE '\\'"));
+                sql.push_str(&format!(
+                    " AND lower({subject_col}) LIKE lower(?) ESCAPE '\\'"
+                ));
             }
             params_vec.push(like);
         } else {
@@ -915,7 +917,9 @@ impl IndexDb {
         }
 
         sql.push_str(" ORDER BY items.name COLLATE NOCASE");
-        let _ = tx.send(AppEvent::SearchStatus("Searching indexed roots...".to_string()));
+        let _ = tx.send(AppEvent::SearchStatus(
+            "Searching indexed roots...".to_string(),
+        ));
 
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(params_vec.iter()))?;
@@ -1073,12 +1077,14 @@ impl ISSearchApp {
             }
         };
 
-        let q_logo = load_color_image(Q_LOGO_BYTES)
-            .ok()
-            .map(|image| cc.egui_ctx.load_texture("q_logo", image, Default::default()));
-        let is_logo = load_color_image(IS_LOGO_BYTES)
-            .ok()
-            .map(|image| cc.egui_ctx.load_texture("is_logo", image, Default::default()));
+        let q_logo = load_color_image(Q_LOGO_BYTES).ok().map(|image| {
+            cc.egui_ctx
+                .load_texture("q_logo", image, Default::default())
+        });
+        let is_logo = load_color_image(IS_LOGO_BYTES).ok().map(|image| {
+            cc.egui_ctx
+                .load_texture("is_logo", image, Default::default())
+        });
 
         let roots = get_default_roots();
         let roots_text = roots.join(";");
@@ -1167,7 +1173,9 @@ impl ISSearchApp {
 
     fn initial_index_finished(&self) -> bool {
         !self.initial_index_roots.is_empty()
-            && self.get_unindexed_roots(&self.initial_index_roots).is_empty()
+            && self
+                .get_unindexed_roots(&self.initial_index_roots)
+                .is_empty()
     }
 
     fn update_initial_placeholder(&mut self, root: Option<String>, count: Option<usize>) {
@@ -1208,12 +1216,12 @@ impl ISSearchApp {
             .trim()
             .parse::<usize>()
             .context("Max results must be 0 or a positive integer.")?;
-        let max_file_size_mb = self
+        let max_file_mb = self
             .max_file_mb
             .trim()
             .parse::<f64>()
             .context("Max file MB must be a positive number.")?;
-        if max_file_size_mb <= 0.0 {
+        if max_file_mb <= 0.0 {
             anyhow::bail!("Max file MB must be a positive number.");
         }
 
@@ -1232,14 +1240,14 @@ impl ISSearchApp {
             include_hidden: self.include_hidden,
             case_sensitive: self.case_sensitive,
             max_results,
-            max_file_size_mb,
             query_mode: self.query_mode,
         })
     }
 
     fn start_search(&mut self) {
         if self.initial_indexing {
-            self.status = "Still indexing. Search will be available when the first index finishes.".to_string();
+            self.status = "Still indexing. Search will be available when the first index finishes."
+                .to_string();
             return;
         }
         if self.search_running {
@@ -1266,8 +1274,10 @@ impl ISSearchApp {
         if !live_roots.is_empty() && !indexed_roots.is_empty() {
             options.roots = indexed_roots;
         } else if !live_roots.is_empty() {
-            self.dialog =
-                Some("Search is index-only, but one or more selected roots are not indexed yet.".to_string());
+            self.dialog = Some(
+                "Search is index-only, but one or more selected roots are not indexed yet."
+                    .to_string(),
+            );
             return;
         }
 
@@ -1548,14 +1558,17 @@ impl ISSearchApp {
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label("Search");
-                    ui.horizontal(|ui| {
-                        logo(ui, &self.q_logo);
+                    let label_offset =
+                        ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                        logo(ui, &self.q_logo, 72.0);
+                        let pattern_width = flexible_width(ui, 430.0, 280.0);
                         ui.vertical(|ui| {
                             ui.label("Pattern");
                             let response = ui.add_enabled(
                                 !self.initial_indexing,
                                 egui::TextEdit::singleline(&mut self.pattern)
-                                    .desired_width(f32::INFINITY),
+                                    .desired_width(pattern_width),
                             );
                             if response.changed() && self.auto_search {
                                 self.auto_search_at = Some(Instant::now() + Duration::from_millis(350));
@@ -1567,8 +1580,9 @@ impl ISSearchApp {
                             }
                         });
                         ui.vertical(|ui| {
+                            ui.set_min_width(115.0);
                             ui.label("Pattern mode");
-                            egui::ComboBox::from_id_source("query_mode")
+                            egui::ComboBox::from_id_salt("query_mode")
                                 .selected_text(self.query_mode.label())
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut self.query_mode, QueryMode::Auto, "Auto");
@@ -1580,22 +1594,34 @@ impl ISSearchApp {
                                     ui.selectable_value(&mut self.query_mode, QueryMode::Regex, "Regex");
                                 });
                         });
-                        if ui
-                            .add_enabled(!self.initial_indexing, egui::Button::new("Search"))
-                            .clicked()
-                        {
-                            self.start_search();
-                        }
-                        if ui
-                            .add_enabled(self.search_running, egui::Button::new("Stop"))
-                            .clicked()
-                        {
-                            self.stop_search();
-                        }
-                        logo(ui, &self.is_logo);
+                        ui.vertical(|ui| {
+                            ui.add_space(label_offset);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        !self.initial_indexing,
+                                        egui::Button::new("Search")
+                                            .min_size(egui::vec2(72.0, 24.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_search();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.search_running,
+                                        egui::Button::new("Stop").min_size(egui::vec2(58.0, 24.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.stop_search();
+                                }
+                            });
+                        });
+                        logo(ui, &self.is_logo, 72.0);
                     });
                     ui.add_space(6.0);
-                    ui.label("Auto pattern: TAP*.xlsx uses wildcard. Default search uses the current index.");
+                    ui.label("Auto pattern: *SPEC*.xlsx uses wildcard to find any file with the word 'SPEC' ending in .xlsx.");
                 });
             });
     }
@@ -1607,12 +1633,13 @@ impl ISSearchApp {
             .show(ui, |ui| {
                 ui.label("Options");
                 ui.horizontal(|ui| {
+                    let roots_width = flexible_width(ui, 520.0, 300.0);
                     ui.vertical(|ui| {
                         ui.label("Roots (semicolon-separated)");
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.roots_text)
-                                    .desired_width(f32::INFINITY),
+                                    .desired_width(roots_width),
                             );
                             if ui.button("Browse...").clicked() {
                                 self.browse_root();
@@ -1623,12 +1650,17 @@ impl ISSearchApp {
                         });
                     });
                     ui.vertical(|ui| {
+                        ui.set_min_width(90.0);
                         ui.label("Type");
-                        egui::ComboBox::from_id_source("type")
+                        egui::ComboBox::from_id_salt("type")
                             .selected_text(self.search_type.label())
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut self.search_type, SearchType::Any, "Any");
-                                ui.selectable_value(&mut self.search_type, SearchType::File, "File");
+                                ui.selectable_value(
+                                    &mut self.search_type,
+                                    SearchType::File,
+                                    "File",
+                                );
                                 ui.selectable_value(
                                     &mut self.search_type,
                                     SearchType::Directory,
@@ -1638,11 +1670,15 @@ impl ISSearchApp {
                     });
                     ui.vertical(|ui| {
                         ui.label("Max results");
-                        ui.add(egui::TextEdit::singleline(&mut self.max_results).desired_width(80.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.max_results).desired_width(80.0),
+                        );
                     });
                     ui.vertical(|ui| {
                         ui.label("Max file MB");
-                        ui.add(egui::TextEdit::singleline(&mut self.max_file_mb).desired_width(80.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.max_file_mb).desired_width(80.0),
+                        );
                     });
                 });
                 ui.add_space(8.0);
@@ -1661,27 +1697,38 @@ impl ISSearchApp {
             .inner_margin(egui::Margin::same(10.0))
             .show(ui, |ui| {
                 ui.label("Index");
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
-                        .add_enabled(!self.manual_index_running, egui::Button::new("Refresh index now"))
+                        .add_enabled(
+                            !self.manual_index_running,
+                            egui::Button::new("Refresh index now"),
+                        )
                         .clicked()
                     {
                         self.start_manual_index();
                     }
                     if ui
-                        .add_enabled(!self.background_running, egui::Button::new("Start background indexing"))
+                        .add_enabled(
+                            !self.background_running,
+                            egui::Button::new("Start background indexing"),
+                        )
                         .clicked()
                     {
                         self.start_background_indexing(false, None);
                     }
                     if ui
-                        .add_enabled(self.background_running, egui::Button::new("Stop background indexing"))
+                        .add_enabled(
+                            self.background_running,
+                            egui::Button::new("Stop background indexing"),
+                        )
                         .clicked()
                     {
                         self.stop_background_indexing();
                     }
                     ui.label("Interval (min)");
-                    ui.add(egui::TextEdit::singleline(&mut self.index_interval).desired_width(50.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.index_interval).desired_width(50.0),
+                    );
                     if ui.button("Show indexed roots").clicked() {
                         self.show_indexed_roots();
                     }
@@ -1697,7 +1744,9 @@ impl ISSearchApp {
 
     fn show_indexed_roots(&mut self) {
         match self.db.root_stats() {
-            Ok(rows) if rows.is_empty() => self.dialog = Some("No roots have been indexed yet.".to_string()),
+            Ok(rows) if rows.is_empty() => {
+                self.dialog = Some("No roots have been indexed yet.".to_string())
+            }
             Ok(rows) => {
                 let lines: Vec<String> = rows
                     .into_iter()
@@ -1733,9 +1782,13 @@ impl ISSearchApp {
                 header.col(|ui| header_button(ui, "Match", SortColumn::Match, &mut sort_request));
                 header.col(|ui| header_button(ui, "Type", SortColumn::Type, &mut sort_request));
                 header.col(|ui| header_button(ui, "Name", SortColumn::Name, &mut sort_request));
-                header.col(|ui| header_button(ui, "Full Path", SortColumn::FullPath, &mut sort_request));
+                header.col(|ui| {
+                    header_button(ui, "Full Path", SortColumn::FullPath, &mut sort_request)
+                });
                 header.col(|ui| header_button(ui, "Size", SortColumn::Size, &mut sort_request));
-                header.col(|ui| header_button(ui, "Modified", SortColumn::Modified, &mut sort_request));
+                header.col(|ui| {
+                    header_button(ui, "Modified", SortColumn::Modified, &mut sort_request)
+                });
             })
             .body(|body| {
                 body.rows(22.0, self.results.len(), |mut row| {
@@ -1815,7 +1868,10 @@ impl ISSearchApp {
         };
         self.results.sort_by(|a, b| {
             let ord = match column {
-                SortColumn::Match => a.match_type.to_lowercase().cmp(&b.match_type.to_lowercase()),
+                SortColumn::Match => a
+                    .match_type
+                    .to_lowercase()
+                    .cmp(&b.match_type.to_lowercase()),
                 SortColumn::Type => a.item_type.to_lowercase().cmp(&b.item_type.to_lowercase()),
                 SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 SortColumn::FullPath => a.full_path.to_lowercase().cmp(&b.full_path.to_lowercase()),
@@ -1849,7 +1905,10 @@ impl eframe::App for ISSearchApp {
             if self.auto_search_at.is_none() {
                 self.auto_search_at = Some(Instant::now() + Duration::from_millis(350));
             }
-            if self.auto_search_at.is_some_and(|when| Instant::now() >= when) {
+            if self
+                .auto_search_at
+                .is_some_and(|when| Instant::now() >= when)
+            {
                 self.last_pattern = self.pattern.clone();
                 self.auto_search_at = None;
                 self.start_search();
@@ -1860,7 +1919,10 @@ impl eframe::App for ISSearchApp {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
                 ui.separator();
-                ui.label(format!("{} results", format_count(self.result_count as u64)));
+                ui.label(format!(
+                    "{} results",
+                    format_count(self.result_count as u64)
+                ));
             });
             ui.label(format!("Log: {}", log_path().display()));
         });
@@ -1891,13 +1953,26 @@ impl eframe::App for ISSearchApp {
     }
 }
 
-fn logo(ui: &mut egui::Ui, texture: &Option<TextureHandle>) {
+fn flexible_width(ui: &egui::Ui, reserved_width: f32, min_width: f32) -> f32 {
+    let available = ui.available_width();
+    if available.is_finite() {
+        (available - reserved_width).max(min_width)
+    } else {
+        min_width
+    }
+}
+
+fn logo(ui: &mut egui::Ui, texture: &Option<TextureHandle>, max_height: f32) {
     egui::Frame::none()
         .fill(Color32::WHITE)
         .inner_margin(egui::Margin::same(4.0))
         .show(ui, |ui| {
             if let Some(texture) = texture {
-                ui.image((texture.id(), texture.size_vec2()));
+                let mut size = texture.size_vec2();
+                if size.y > max_height && size.y > 0.0 {
+                    size *= max_height / size.y;
+                }
+                ui.add(egui::Image::new((texture.id(), size)));
             }
         });
 }
