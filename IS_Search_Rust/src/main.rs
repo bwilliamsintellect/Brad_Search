@@ -26,6 +26,7 @@ const APP_TITLE: &str = "IS Search";
 const APP_USER_MODEL_ID: &str = "Quanta.ISSearch";
 const Q_LOGO_BYTES: &[u8] = include_bytes!("../assets/Q Grey Logo.png");
 const IS_LOGO_BYTES: &[u8] = include_bytes!("../assets/IS.png");
+const IS_LOGO_RIGHT_PADDING: f32 = 48.0;
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
@@ -1068,6 +1069,7 @@ struct ISSearchApp {
 
 impl ISSearchApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_white_theme(&cc.egui_ctx);
         let (tx, rx) = mpsc::channel();
         let db = match IndexDb::new(db_path()) {
             Ok(db) => db,
@@ -1552,9 +1554,7 @@ impl ISSearchApp {
     }
 
     fn show_header(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
-            .stroke(egui::Stroke::new(1.0, Color32::from_gray(190)))
-            .inner_margin(egui::Margin::same(10.0))
+        section_frame()
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label("Search");
@@ -1562,13 +1562,15 @@ impl ISSearchApp {
                         ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                         logo(ui, &self.q_logo, 72.0);
-                        let pattern_width = flexible_width(ui, 430.0, 280.0);
+                        let pattern_width =
+                            flexible_width(ui, 430.0 + IS_LOGO_RIGHT_PADDING, 280.0);
                         ui.vertical(|ui| {
                             ui.label("Pattern");
-                            let response = ui.add_enabled(
+                            let response = bordered_text_edit(
+                                ui,
+                                &mut self.pattern,
+                                pattern_width,
                                 !self.initial_indexing,
-                                egui::TextEdit::singleline(&mut self.pattern)
-                                    .desired_width(pattern_width),
                             );
                             if response.changed() && self.auto_search {
                                 self.auto_search_at = Some(Instant::now() + Duration::from_millis(350));
@@ -1619,6 +1621,7 @@ impl ISSearchApp {
                             });
                         });
                         logo(ui, &self.is_logo, 72.0);
+                        ui.add_space(IS_LOGO_RIGHT_PADDING);
                     });
                     ui.add_space(6.0);
                     ui.label("Auto pattern: *SPEC*.xlsx uses wildcard to find any file with the word 'SPEC' ending in .xlsx.");
@@ -1627,119 +1630,100 @@ impl ISSearchApp {
     }
 
     fn show_options(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
-            .stroke(egui::Stroke::new(1.0, Color32::from_gray(190)))
-            .inner_margin(egui::Margin::same(10.0))
-            .show(ui, |ui| {
-                ui.label("Options");
-                ui.horizontal(|ui| {
-                    let roots_width = flexible_width(ui, 520.0, 300.0);
-                    ui.vertical(|ui| {
-                        ui.label("Roots (semicolon-separated)");
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.roots_text)
-                                    .desired_width(roots_width),
-                            );
-                            if ui.button("Browse...").clicked() {
-                                self.browse_root();
-                            }
-                            if ui.button("Save default").clicked() {
-                                self.save_roots_as_default();
-                            }
-                        });
-                    });
-                    ui.vertical(|ui| {
-                        ui.set_min_width(90.0);
-                        ui.label("Type");
-                        egui::ComboBox::from_id_salt("type")
-                            .selected_text(self.search_type.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.search_type, SearchType::Any, "Any");
-                                ui.selectable_value(
-                                    &mut self.search_type,
-                                    SearchType::File,
-                                    "File",
-                                );
-                                ui.selectable_value(
-                                    &mut self.search_type,
-                                    SearchType::Directory,
-                                    "Directory",
-                                );
-                            });
-                    });
-                    ui.vertical(|ui| {
-                        ui.label("Max results");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.max_results).desired_width(80.0),
-                        );
-                    });
-                    ui.vertical(|ui| {
-                        ui.label("Max file MB");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.max_file_mb).desired_width(80.0),
-                        );
+        section_frame().show(ui, |ui| {
+            ui.label("Options");
+            ui.horizontal(|ui| {
+                let roots_width = flexible_width(ui, 520.0, 300.0);
+                ui.vertical(|ui| {
+                    ui.label("Roots (semicolon-separated)");
+                    ui.horizontal(|ui| {
+                        bordered_text_edit(ui, &mut self.roots_text, roots_width, true);
+                        if ui.button("Browse...").clicked() {
+                            self.browse_root();
+                        }
+                        if ui.button("Save default").clicked() {
+                            self.save_roots_as_default();
+                        }
                     });
                 });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.match_name_only, "Match name only");
-                    ui.checkbox(&mut self.include_hidden, "Include hidden/system");
-                    ui.checkbox(&mut self.case_sensitive, "Case sensitive");
-                    ui.checkbox(&mut self.auto_search, "Auto search while typing");
+                ui.vertical(|ui| {
+                    ui.set_min_width(90.0);
+                    ui.label("Type");
+                    egui::ComboBox::from_id_salt("type")
+                        .selected_text(self.search_type.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.search_type, SearchType::Any, "Any");
+                            ui.selectable_value(&mut self.search_type, SearchType::File, "File");
+                            ui.selectable_value(
+                                &mut self.search_type,
+                                SearchType::Directory,
+                                "Directory",
+                            );
+                        });
+                });
+                ui.vertical(|ui| {
+                    ui.label("Max results");
+                    bordered_text_edit(ui, &mut self.max_results, 80.0, true);
+                });
+                ui.vertical(|ui| {
+                    ui.label("Max file MB");
+                    bordered_text_edit(ui, &mut self.max_file_mb, 80.0, true);
                 });
             });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.match_name_only, "Match name only");
+                ui.checkbox(&mut self.include_hidden, "Include hidden/system");
+                ui.checkbox(&mut self.case_sensitive, "Case sensitive");
+                ui.checkbox(&mut self.auto_search, "Auto search while typing");
+            });
+        });
     }
 
     fn show_index_controls(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
-            .stroke(egui::Stroke::new(1.0, Color32::from_gray(190)))
-            .inner_margin(egui::Margin::same(10.0))
-            .show(ui, |ui| {
-                ui.label("Index");
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
-                            !self.manual_index_running,
-                            egui::Button::new("Refresh index now"),
-                        )
-                        .clicked()
-                    {
-                        self.start_manual_index();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.background_running,
-                            egui::Button::new("Start background indexing"),
-                        )
-                        .clicked()
-                    {
-                        self.start_background_indexing(false, None);
-                    }
-                    if ui
-                        .add_enabled(
-                            self.background_running,
-                            egui::Button::new("Stop background indexing"),
-                        )
-                        .clicked()
-                    {
-                        self.stop_background_indexing();
-                    }
-                    ui.label("Interval (min)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.index_interval).desired_width(50.0),
-                    );
-                    if ui.button("Show indexed roots").clicked() {
-                        self.show_indexed_roots();
-                    }
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(&self.index_summary);
-                    ui.separator();
-                    ui.label(&self.bg_status);
-                });
+        section_frame().show(ui, |ui| {
+            ui.label("Index");
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.manual_index_running,
+                        egui::Button::new("Refresh index now"),
+                    )
+                    .clicked()
+                {
+                    self.start_manual_index();
+                }
+                if ui
+                    .add_enabled(
+                        !self.background_running,
+                        egui::Button::new("Start background indexing"),
+                    )
+                    .clicked()
+                {
+                    self.start_background_indexing(false, None);
+                }
+                if ui
+                    .add_enabled(
+                        self.background_running,
+                        egui::Button::new("Stop background indexing"),
+                    )
+                    .clicked()
+                {
+                    self.stop_background_indexing();
+                }
+                ui.label("Interval (min)");
+                bordered_text_edit(ui, &mut self.index_interval, 50.0, true);
+                if ui.button("Show indexed roots").clicked() {
+                    self.show_indexed_roots();
+                }
             });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(&self.index_summary);
+                ui.separator();
+                ui.label(&self.bg_status);
+            });
+        });
     }
 
     fn show_indexed_roots(&mut self) {
@@ -1915,27 +1899,31 @@ impl eframe::App for ISSearchApp {
             }
         }
 
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                ui.separator();
-                ui.label(format!(
-                    "{} results",
-                    format_count(self.result_count as u64)
-                ));
+        egui::TopBottomPanel::bottom("status_bar")
+            .frame(egui::Frame::none().fill(Color32::WHITE))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(&self.status);
+                    ui.separator();
+                    ui.label(format!(
+                        "{} results",
+                        format_count(self.result_count as u64)
+                    ));
+                });
+                ui.label(format!("Log: {}", log_path().display()));
             });
-            ui.label(format!("Log: {}", log_path().display()));
-        });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.show_header(ui);
-            ui.add_space(8.0);
-            self.show_options(ui);
-            ui.add_space(8.0);
-            self.show_index_controls(ui);
-            ui.add_space(8.0);
-            self.show_results(ui);
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(Color32::WHITE))
+            .show(ctx, |ui| {
+                self.show_header(ui);
+                ui.add_space(8.0);
+                self.show_options(ui);
+                ui.add_space(8.0);
+                self.show_index_controls(ui);
+                ui.add_space(8.0);
+                self.show_results(ui);
+            });
 
         if let Some(message) = self.dialog.clone() {
             egui::Window::new(APP_TITLE)
@@ -1951,6 +1939,79 @@ impl eframe::App for ISSearchApp {
 
         ctx.request_repaint_after(Duration::from_millis(100));
     }
+}
+
+fn apply_white_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::light();
+    let field_border = Color32::from_gray(145);
+    let field_hover = Color32::from_rgb(80, 150, 210);
+    let field_focus = Color32::from_rgb(0, 120, 215);
+    visuals.panel_fill = Color32::WHITE;
+    visuals.window_fill = Color32::WHITE;
+    visuals.extreme_bg_color = Color32::WHITE;
+    visuals.faint_bg_color = Color32::from_gray(248);
+    visuals.widgets.noninteractive.bg_fill = Color32::WHITE;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, Color32::from_gray(190));
+    visuals.widgets.inactive.bg_fill = Color32::WHITE;
+    visuals.widgets.inactive.weak_bg_fill = Color32::from_gray(246);
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, field_border);
+    visuals.widgets.hovered.bg_fill = Color32::from_gray(250);
+    visuals.widgets.hovered.weak_bg_fill = Color32::from_gray(242);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, field_hover);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(245, 251, 255);
+    visuals.widgets.active.weak_bg_fill = Color32::from_rgb(235, 247, 255);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, field_focus);
+    visuals.widgets.open.bg_fill = Color32::from_rgb(245, 251, 255);
+    visuals.widgets.open.weak_bg_fill = Color32::from_rgb(235, 247, 255);
+    visuals.widgets.open.bg_stroke = egui::Stroke::new(2.0, field_focus);
+    ctx.set_visuals(visuals);
+}
+
+fn section_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(Color32::WHITE)
+        .stroke(egui::Stroke::new(1.0, Color32::from_gray(190)))
+        .inner_margin(egui::Margin::same(10.0))
+}
+
+fn bordered_text_edit(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    width: f32,
+    enabled: bool,
+) -> egui::Response {
+    let fill = if enabled {
+        Color32::WHITE
+    } else {
+        Color32::from_gray(232)
+    };
+    let inner = egui::Frame::none()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, Color32::from_gray(105)))
+        .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+        .show(ui, |ui| {
+            ui.add_enabled(
+                enabled,
+                egui::TextEdit::singleline(text)
+                    .desired_width(width)
+                    .frame(false),
+            )
+        });
+
+    let response = inner.inner;
+    let stroke = if response.has_focus() {
+        egui::Stroke::new(2.0, Color32::from_rgb(0, 120, 215))
+    } else if response.hovered() || inner.response.hovered() {
+        egui::Stroke::new(1.5, Color32::from_rgb(80, 150, 210))
+    } else {
+        egui::Stroke::new(1.0, Color32::from_gray(105))
+    };
+    ui.painter().rect_stroke(
+        inner.response.rect.expand(0.5),
+        egui::Rounding::same(2.0),
+        stroke,
+    );
+    response
 }
 
 fn flexible_width(ui: &egui::Ui, reserved_width: f32, min_width: f32) -> f32 {
